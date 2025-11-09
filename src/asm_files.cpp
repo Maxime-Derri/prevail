@@ -84,10 +84,10 @@ struct parse_params_t {
     const std::string desired_section;
 };
 
-std::vector<RawProgram> read_elf(const std::string& path, const std::string& desired_section,
+std::vector<RawProgram> read_elf(const std::string& path, const std::string& desired_section, const std::string& desired_program,
                                  const ebpf_verifier_options_t& options, const ebpf_platform_t* platform) {
     if (std::ifstream stream{path, std::ios::in | std::ios::binary}) {
-        return read_elf(stream, path, desired_section, options, platform);
+        return read_elf(stream, path, desired_section, desired_program, options, platform);
     }
     struct stat st;
     if (stat(path.c_str(), &st)) {
@@ -358,6 +358,7 @@ class ProgramReader {
             return {};
         }
         resolved_subprograms[&prog] = true;
+        prog.function_locations.emplace_back(std::pair{0, prog.prog.size()-1});
 
         // Perform function relocations and fill in the inst.imm values of CallLocal instructions.
         std::map<std::string, ELFIO::Elf_Xword> subprogram_offsets;
@@ -394,9 +395,22 @@ class ProgramReader {
                     }
 
                     // Append subprogram to program.
+                    size_t begin = prog.prog.size();
+                    size_t end = 0;
+                    for (const auto& location : subprogram->function_locations) {
+                        end = begin + (location.second - location.first);
+                        if (end <= begin)
+                            return std::string("A program location is incorrect");
+                        prog.function_locations.emplace_back(std::pair{begin, end});
+                        begin = end + 1;
+                    }
+
                     prog.prog.insert(prog.prog.end(), subprogram->prog.begin(), subprogram->prog.end());
-                    for (size_t i = 0; i < subprogram->info.line_info.size(); i++) {
-                        prog.info.line_info[prog.info.line_info.size()] = subprogram->info.line_info[i];
+
+                    if (parse_params.options.verbosity_opts.print_line_info) {
+                        for (size_t i = 0; i < subprogram->info.line_info.size(); i++) {
+                            prog.info.line_info[prog.info.line_info.size()] = subprogram->info.line_info[i];
+                        }
                     }
                 } else {
                     // The program will be invalid, but continue rather than throwing an exception
@@ -578,6 +592,7 @@ class ProgramReader {
                     gsl::narrow_cast<uint32_t>(program_offset),
                     program_name,
                     std::move(instructions),
+                    {},
                     ProgramInfo{
                         .platform = parse_params.platform,
                         .map_descriptors = global.map_descriptors,
@@ -598,9 +613,11 @@ class ProgramReader {
                                  "\nMake sure to inline all function calls.");
         }
 
-        if (const auto btf_section = reader.sections[".BTF"]) {
-            if (const auto btf_ext = reader.sections[".BTF.ext"]) {
-                update_line_info(raw_programs, btf_section, btf_ext);
+        if (parse_params.options.verbosity_opts.print_line_info) {
+            if (const auto btf_section = reader.sections[".BTF"]) {
+                if (const auto btf_ext = reader.sections[".BTF.ext"]) {
+                    update_line_info(raw_programs, btf_section, btf_ext);
+                }
             }
         }
 
@@ -638,15 +655,30 @@ class ProgramReader {
 };
 
 std::vector<RawProgram> read_elf(std::istream& input_stream, const std::string& path,
-                                 const std::string& desired_section, const ebpf_verifier_options_t& options,
-                                 const ebpf_platform_t* platform) {
+                                 const std::string& desired_section, const std::string& desired_program,
+                                 const ebpf_verifier_options_t& options, const ebpf_platform_t* platform) {
     const parse_params_t parse_params{
         .path = path, .options = options, .platform = platform, .desired_section = desired_section};
     const ELFIO::elfio reader = load_elf(input_stream, path);
     const ELFIO::const_symbol_section_accessor symbols = read_and_validate_symbol_section(reader, path);
     const elf_global_data global = extract_global_data(parse_params, reader, symbols);
     ProgramReader program_reader{parse_params, reader, symbols, global};
+
+    // raw_programs contains functions associated to the desired_section
     program_reader.read_programs();
+
+    // Return the desired_program, or raw_programs
+    if (desired_program.empty()) {
+        return std::move(program_reader.raw_programs);
+    }
+    for (RawProgram& cur : program_reader.raw_programs) {
+        if (cur.function_name == desired_program) {
+            std::vector<RawProgram> res;
+            res.emplace_back(std::move(cur));
+            return res;
+        }
+    }
+
     return std::move(program_reader.raw_programs);
 }
 } // namespace prevail

@@ -15,8 +15,8 @@ using std::vector;
 
 namespace prevail {
 class AssertExtractor {
-    ProgramInfo info;
-    std::optional<Label> current_label; ///< Pre-simplification label this assert is part of.
+    const ProgramInfo& info;
+    const std::string& frame_prefix; ///< Pre-simplification label this assert is part of.
 
     static Imm imm(const Value& v) { return std::get<Imm>(v); }
 
@@ -29,13 +29,13 @@ class AssertExtractor {
 
     ValidAccess make_valid_access(const Reg reg, const int32_t offset = {}, const Value& width = Imm{0},
                                   const bool or_null = {}, const AccessType access_type = {}) const {
-        const int depth = current_label.has_value() ? current_label.value().call_stack_depth() : 1;
+        const int depth = call_stack_depth(frame_prefix);
         return ValidAccess{depth, reg, offset, width, or_null, access_type};
     }
 
   public:
-    explicit AssertExtractor(ProgramInfo info, std::optional<Label> label)
-        : info{std::move(info)}, current_label(label) {}
+    explicit AssertExtractor(const ProgramInfo &info, const std::string& frame_prefix)
+        : info{info}, frame_prefix{frame_prefix} {}
 
     vector<Assertion> operator()(const Undefined&) const {
         // assert(false);
@@ -52,7 +52,8 @@ class AssertExtractor {
 
     vector<Assertion> operator()(const Exit&) const {
         vector<Assertion> res;
-        if (current_label->stack_frame_prefix.empty()) {
+        // TODO: every function should return R0??
+        if (frame_prefix.empty()) {
             // Verify that Exit returns a number.
             res.emplace_back(TypeConstraint{Reg{R0_RETURN_VALUE}, TypeGroup::number});
         }
@@ -62,7 +63,7 @@ class AssertExtractor {
     vector<Assertion> operator()(const Call& call) const {
         vector<Assertion> res;
         std::optional<Reg> map_fd_reg;
-        res.emplace_back(ValidCall{call.func, call.stack_frame_prefix});
+        res.emplace_back(ValidCall{call.func, frame_prefix});
         for (ArgSingle arg : call.singles) {
             switch (arg.kind) {
             case ArgSingle::Kind::ANYTHING:
@@ -127,10 +128,10 @@ class AssertExtractor {
 
     [[nodiscard]]
     vector<Assertion> explicate(const Condition& cond) const {
-        if (info.type.is_privileged) {
-            return {};
-        }
         vector<Assertion> res;
+        if (info.type.is_privileged) {
+            return res;
+        }
         if (const auto pimm = std::get_if<Imm>(&cond.right)) {
             if (pimm->v != 0) {
                 // no need to check for valid access, it must be a number
@@ -267,9 +268,7 @@ class AssertExtractor {
                 vector<Assertion> res;
                 // disallow map-map since same type does not mean same offset
                 // TODO: map identities
-                res.emplace_back(TypeConstraint{ins.dst, TypeGroup::ptr_or_num});
-                res.emplace_back(Comparable{.r1 = ins.dst, .r2 = *reg, .or_r2_is_number = true});
-                return res;
+                return {TypeConstraint{ins.dst, TypeGroup::ptr_or_num}, Comparable{.r1 = ins.dst, .r2 = *reg, .or_r2_is_number = true}};
             }
             return {Assertion{TypeConstraint{ins.dst, TypeGroup::ptr_or_num}}};
         }
@@ -303,7 +302,7 @@ class AssertExtractor {
 /// compare numbers and pointers, or pointers to potentially distinct memory
 /// regions. The verifier will use these assertions to treat the program as
 /// unsafe unless it can prove that the assertions can never fail.
-vector<Assertion> get_assertions(Instruction ins, const ProgramInfo& info, const std::optional<Label>& label) {
-    return std::visit(AssertExtractor{info, label}, ins);
+vector<Assertion> get_assertions(const Instruction& ins, const ProgramInfo& info, const std::string& frame_prefix) {
+    return std::visit(AssertExtractor{info, frame_prefix}, ins);
 }
 } // namespace prevail

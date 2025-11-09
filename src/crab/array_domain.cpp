@@ -843,6 +843,14 @@ void ArrayDomain::operator|=(const ArrayDomain& other) {
     num_bytes |= other.num_bytes;
 }
 
+void ArrayDomain::operator|=(ArrayDomain&& other) {
+    if (is_bottom()) {
+        *this = std::move(other);
+        return;
+    }
+    num_bytes |= std::move(other.num_bytes);
+}
+
 ArrayDomain ArrayDomain::operator|(const ArrayDomain& other) const { return ArrayDomain(num_bytes | other.num_bytes); }
 
 ArrayDomain ArrayDomain::operator&(const ArrayDomain& other) const { return ArrayDomain(num_bytes & other.num_bytes); }

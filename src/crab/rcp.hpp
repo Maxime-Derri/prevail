@@ -95,6 +95,7 @@ struct TypeToNumDomain {
     void join_selective(const TypeToNumDomain& right);
 
     void operator|=(const TypeToNumDomain& other);
+    void operator|=(TypeToNumDomain&& other);
 
     TypeToNumDomain operator&(const TypeToNumDomain& other) const;
 

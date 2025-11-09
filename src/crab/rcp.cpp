@@ -71,7 +71,18 @@ void TypeToNumDomain::operator|=(const TypeToNumDomain& other) {
         return;
     }
     this->join_selective(other);
-    this->types = types | other.types;
+    this->types |= other.types;
+}
+
+void TypeToNumDomain::operator|=(TypeToNumDomain&& other) {
+    if (is_bottom()) {
+        *this = other;
+    }
+    if (other.is_bottom()) {
+        return;
+    }
+    this->join_selective(other);
+    this->types |= std::move(other.types);
 }
 
 TypeToNumDomain TypeToNumDomain::operator&(const TypeToNumDomain& other) const {

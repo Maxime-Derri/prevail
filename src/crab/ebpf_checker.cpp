@@ -128,11 +128,11 @@ void ebpf_domain_assume(EbpfDomain& dom, const Assertion& assertion) {
 }
 
 std::vector<std::string> ebpf_domain_check(const EbpfDomain& dom, const Assertion& assertion) {
+    std::vector<std::string> warnings;
     if (dom.is_bottom()) {
-        return {};
+        return warnings;
     }
     EbpfDomain copy = dom;
-    std::vector<std::string> warnings;
     EbpfChecker checker{copy, assertion,
                         [&warnings](const TypeToNumDomain& inv, const LinearConstraint& cst, const std::string& msg) {
                             if (!check_require_type(inv, cst)) {
@@ -271,7 +271,7 @@ void EbpfChecker::operator()(const FuncConstraint& s) const {
                 return;
             }
             const Call call = make_call(imm, *thread_local_program_info->platform);
-            for (const Assertion& sub_assertion : get_assertions(call, *thread_local_program_info, {})) {
+            for (const Assertion& sub_assertion : get_assertions(call, *thread_local_program_info, dom.frame_prefix.value())) { //frame_prefix is set in dom for Call
                 // TODO: create explicit sub assertions elsewhere
                 EbpfChecker{dom, sub_assertion, on_require_type, on_require_value}.visit(sub_assertion);
             }

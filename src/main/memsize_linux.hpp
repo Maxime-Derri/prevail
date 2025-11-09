@@ -10,6 +10,10 @@
 #include <unistd.h>
 
 namespace prevail {
+
+const std::string VMHWM = "VmHWM:";
+const std::string VMRSS = "VmRSS:";
+
 inline long resident_set_size_kb() {
     long rss = 0;
     {
@@ -23,4 +27,22 @@ inline long resident_set_size_kb() {
     const long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024; // in case x86-64 is configured to use 2MB pages
     return rss * page_size_kb;
 }
+
+inline long hwm_kb() {
+    long peak_rss = 0;
+    std::string field;
+
+    {
+        std::ifstream status_stream("/proc/self/status", std::ios_base::in);
+        while(status_stream >> field) {
+            //depending on the kernel, VmHWM isnt at the same index
+            if(field == VMHWM)
+                break;
+        }
+        status_stream >> peak_rss;
+    }
+
+    return peak_rss;
+}
+
 } // namespace prevail

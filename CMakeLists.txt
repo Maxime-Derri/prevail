@@ -8,6 +8,8 @@ endif ()
 
 project(prevail)
 
+#add_compile_options(-Wnrvo) #print warnings when NRVO can't be applied
+
 include(FetchContent)
 
 if (IS_DIRECTORY "${PROJECT_SOURCE_DIR}/.git")

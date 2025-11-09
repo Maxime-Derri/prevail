@@ -14,11 +14,11 @@ class UnmarshalError final : public std::runtime_error {
 };
 
 std::vector<RawProgram> read_raw(std::string path, ProgramInfo info);
-std::vector<RawProgram> read_elf(const std::string& path, const std::string& desired_section,
+std::vector<RawProgram> read_elf(const std::string& path, const std::string& desired_section, const std::string& desired_program,
                                  const ebpf_verifier_options_t& options, const ebpf_platform_t* platform);
 std::vector<RawProgram> read_elf(std::istream& input_stream, const std::string& path,
-                                 const std::string& desired_section, const ebpf_verifier_options_t& options,
-                                 const ebpf_platform_t* platform);
+                                 const std::string& desired_section, const std::string& desired_program,
+                                 const ebpf_verifier_options_t& options, const ebpf_platform_t* platform);
 
 void write_binary_file(std::string path, const char* data, size_t size);
 

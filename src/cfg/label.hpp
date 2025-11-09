@@ -16,23 +16,44 @@ namespace prevail {
 
 constexpr char STACK_FRAME_DELIMITER = '/';
 
+enum class SpecialLabel : char {
+    Empty = -1,
+    Exit = 0,
+    CallLocal = 1,
+    Call = 2,
+    LoopCounter = 3,
+};
+
+std::string to_string(SpecialLabel label);
+
 struct Label {
-    std::string stack_frame_prefix; ///< Variable prefix when calling this label.
     int from{};                     ///< Jump source, or simply index of instruction
     int to{};                       ///< Jump target or -1
-    std::string special_label;      ///< Special label for special instructions.
+    SpecialLabel special_label;    ///< Special label for special instructions.
 
-    explicit Label(const int index, const int to = -1, std::string stack_frame_prefix = {}) noexcept
-        : stack_frame_prefix(std::move(stack_frame_prefix)), from(index), to(to) {}
+    explicit Label(const int index, const int to = -1, SpecialLabel special = SpecialLabel::Empty) noexcept
+        : from(index), to(to), special_label(special) {}
 
     static Label make_jump(const Label& src_label, const Label& target_label) {
-        return Label{src_label.from, target_label.from, target_label.stack_frame_prefix};
+        return Label{src_label.from, target_label.from};
     }
 
     static Label make_increment_counter(const Label& label) {
         // XXX: This is a hack to increment the loop counter.
-        Label res{label.from, label.to, label.stack_frame_prefix};
-        res.special_label = "counter";
+        Label res{label.from, label.to};
+        res.special_label = SpecialLabel::LoopCounter;
+        return res;
+    }
+
+    static Label make_call_local(const Label& label) {
+        Label res{label.from, label.to};
+        res.special_label = SpecialLabel::CallLocal;
+        return res;
+    }
+
+    static Label make_exit(const Label& label) {
+        Label res{label.from, label.to};
+        res.special_label = SpecialLabel::Exit;
         return res;
     }
 
@@ -45,23 +66,23 @@ struct Label {
         return to != -1;
     }
 
-    [[nodiscard]]
-    int call_stack_depth() const {
-        // The call stack depth is the number of '/' separated components in the label,
-        // which is one more than the number of '/' separated components in the prefix,
-        // hence two more than the number of '/' in the prefix, if any.
-        if (stack_frame_prefix.empty()) {
-            return 1;
-        }
-        return gsl::narrow<int>(2 + std::ranges::count(stack_frame_prefix, STACK_FRAME_DELIMITER));
-    }
-
     static const Label entry;
     static const Label exit;
 };
 
+//[[nodiscard]]
+//size_t call_stack_depth(const std::string& frame_prefix) {
+//    // The call stack depth is the number of '/' separated components in the prefix,
+//    // which is one more than the number of '/' separated components in the prefix,
+//    // hence two more than the number of '/' in the prefix, if any.
+//    if (frame_prefix.empty()) {
+//        return 1;
+//    }
+//    return gsl::narrow<int>(2 + std::ranges::count(frame_prefix, STACK_FRAME_DELIMITER));
+//}
+
 inline const Label Label::entry{-1};
-inline const Label Label::exit{INT_MAX};
+inline const Label Label::exit{INT_MAX, -1, SpecialLabel::Exit};
 
 std::ostream& operator<<(std::ostream& os, const Label& label);
 std::string to_string(Label const& label);

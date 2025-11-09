@@ -361,12 +361,14 @@ void EbpfTransformer::operator()(const Exit& a) {
         return;
     }
     // Clean up any state for the current stack frame.
-    const std::string prefix = a.stack_frame_prefix;
-    if (prefix.empty()) {
+
+    if (!dom.frame_prefix.has_value()) {
         return;
     }
-    havoc_subprogram_stack(prefix);
-    restore_callee_saved_registers(prefix);
+    const std::string& frame_prefix = dom.frame_prefix.value();
+
+    havoc_subprogram_stack(frame_prefix);
+    restore_callee_saved_registers(frame_prefix);
 
     // Restore r10.
     constexpr Reg r10_reg{R10_STACK_POINTER};
@@ -832,7 +834,12 @@ void EbpfTransformer::operator()(const CallLocal& call) {
     if (dom.is_bottom()) {
         return;
     }
-    save_callee_saved_registers(call.stack_frame_prefix);
+
+    if (!dom.frame_prefix.has_value()) {
+        throw std::runtime_error("frame prefix is not set");
+    }
+
+    save_callee_saved_registers(dom.frame_prefix.value());
 
     // Update r10.
     constexpr Reg r10_reg{R10_STACK_POINTER};

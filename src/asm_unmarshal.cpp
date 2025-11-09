@@ -14,6 +14,41 @@ using std::string;
 using std::vector;
 
 namespace prevail {
+
+void set_special_label(Label& label, const Instruction& instruction) {
+    if (std::holds_alternative<CallLocal>(instruction)) {
+        label.special_label = SpecialLabel::CallLocal;
+    }
+    else if (std::holds_alternative<Call>(instruction)) {
+        label.special_label = SpecialLabel::Call;
+    }
+    else if (std::holds_alternative<Exit>(instruction)) {
+        label.special_label = SpecialLabel::Exit;
+    }
+    else {
+        label.special_label = SpecialLabel::Empty;
+    }
+}
+
+void set_special_label(Label& label, const EbpfInst& instruction) {
+    const auto mask = instruction.opcode & INST_CLS_MASK;
+    if (mask == INST_CLS_JMP || mask == INST_CLS_JMP32) {
+        switch ((instruction.opcode  >> 4) & 0xF) {
+        case INST_EXIT:
+            label.special_label = SpecialLabel::Exit;
+            break;
+        case INST_CALL:
+            if (instruction.src == INST_CALL_LOCAL) {
+                label.special_label = SpecialLabel::CallLocal;
+            }
+            if (!(instruction.opcode & INST_SRC_REG)) {
+                label.special_label = SpecialLabel::Call;
+            }
+            break;
+        }
+    }
+}
+
 int opcode_to_width(const uint8_t opcode) {
     switch (opcode & INST_SIZE_MASK) {
     case INST_SIZE_B: return 1;
@@ -558,7 +593,28 @@ struct Unmarshaller {
         if (insts[new_pc].opcode == 0) {
             throw InvalidInstruction(pc, "jump to middle of lddw");
         }
-        return Label{gsl::narrow<int>(new_pc)};
+
+        Label label{gsl::narrow<int>(new_pc)};
+
+
+        // Set special_label if the instruction has a target.
+        // These instructions are: CallLocal and conditional jumps.
+        const auto inst = insts[pc];
+        switch ((inst.opcode  >> 4) & 0xF) {
+        case INST_EXIT:
+            break;
+        case INST_CALL:
+            if (inst.src == INST_CALL_LOCAL) {
+                set_special_label(label, insts[new_pc]);
+            }
+            break;
+        case INST_JA:
+        default: // CJ
+            set_special_label(label, insts[new_pc]);
+            break;
+        }
+
+        return label;
     }
 
     static auto makeCallLocal(const EbpfInst inst, const vector<EbpfInst>& insts, const Pc pc) -> CallLocal {
@@ -698,12 +754,113 @@ struct Unmarshaller {
         }
     }
 
-    vector<LabeledInstruction> unmarshal(vector<EbpfInst> const& insts) {
-        vector<LabeledInstruction> prog;
+    vector<LabeledInstruction> unmarshal(const RawProgram& prog, const prevail::ebpf_verifier_options_t &options) {
+        const auto& insts = prog.prog;
+        vector<LabeledInstruction> new_insts;
+        std::vector<std::pair<size_t, size_t>> new_function_locations;
+        size_t pc = 0;
+        size_t new_begin = 0;
+        size_t new_end = 0;
         int exit_count = 0;
+
         if (insts.empty()) {
             throw std::invalid_argument("Zero length programs are not allowed");
         }
+
+        for (const auto& [begin, end] : prog.function_locations) {
+            for (; pc <= end; ) {
+                const EbpfInst inst = insts[pc];
+                Instruction new_ins;
+                bool skip_instruction = false;
+                bool fallthrough = true;
+                switch (inst.opcode & INST_CLS_MASK) {
+                case INST_CLS_LD:
+                    if (inst.opcode == INST_OP_LDDW_IMM) {
+                        const int32_t next_imm = pc < insts.size() - 1 ? insts[pc + 1].imm : 0;
+                        new_ins = makeLddw(inst, next_imm, insts, pc);
+                        skip_instruction = true;
+                        break;
+                    }
+                    // fallthrough
+                case INST_CLS_LDX:
+                case INST_CLS_ST:
+                case INST_CLS_STX: new_ins = makeMemOp(pc, inst); break;
+
+                case INST_CLS_ALU:
+                case INST_CLS_ALU64: {
+                    new_ins = makeAluOp(pc, inst);
+
+                    // Merge (rX <<= 32; rX >>>= 32) into wX = rX
+                    //       (rX <<= 32; rX >>= 32)  into rX s32= rX
+                    if (pc >= insts.size() - 1) {
+                        break;
+                    }
+                    const EbpfInst next = insts[pc + 1];
+                    auto dst = Reg{inst.dst};
+
+                    if (new_ins != shift32(dst, Bin::Op::LSH)) {
+                        break;
+                    }
+
+                    if ((next.opcode & INST_CLS_MASK) != INST_CLS_ALU64) {
+                        break;
+                    }
+                    auto next_ins = makeAluOp(pc + 1, next);
+                    if (next_ins == shift32(dst, Bin::Op::RSH)) {
+                        new_ins = Bin{.op = Bin::Op::MOV, .dst = dst, .v = dst, .is64 = false};
+                        skip_instruction = true;
+                    } else if (next_ins == shift32(dst, Bin::Op::ARSH)) {
+                        new_ins = Bin{.op = Bin::Op::MOVSX32, .dst = dst, .v = dst, .is64 = true};
+                        skip_instruction = true;
+                    }
+
+                    break;
+                }
+
+                case INST_CLS_JMP32:
+                case INST_CLS_JMP: {
+                    new_ins = makeJmp(inst, insts, pc);
+                    if (std::holds_alternative<Exit>(new_ins)) {
+                        fallthrough = false;
+                        exit_count++;
+                    }
+                    if (const auto pjmp = std::get_if<Jmp>(&new_ins)) {
+                        if (!pjmp->cond) {
+                            fallthrough = false;
+                        }
+                    }
+                    break;
+                }
+                default: CRAB_ERROR("invalid class: ", inst.opcode & INST_CLS_MASK);
+                }
+                if (pc == insts.size() - 1 && fallthrough) {
+                    note("fallthrough in last instruction");
+                }
+
+                std::optional<btf_line_info_t> current_line_info = {};
+
+                if (options.verbosity_opts.print_line_info && pc < info.line_info.size()) {
+                    current_line_info = info.line_info.at(pc);
+                }
+
+                Label label{gsl::narrow<int>(pc)};
+                set_special_label(label, new_ins);
+                new_insts.emplace_back(label, new_ins, current_line_info);
+
+                ++pc;
+                ++new_end;
+                note_next_pc();
+                if (skip_instruction) {
+                    pc++;
+                    note_next_pc();
+                }
+            }
+
+            new_function_locations.emplace_back(std::pair{new_begin, new_end - 1});
+            new_begin = new_end;
+        }
+
+/*
         for (size_t pc = 0; pc < insts.size();) {
             const EbpfInst inst = insts[pc];
             Instruction new_ins;
@@ -775,11 +932,13 @@ struct Unmarshaller {
 
             std::optional<btf_line_info_t> current_line_info = {};
 
-            if (pc < info.line_info.size()) {
+            if (options.verbosity_opts.print_line_info && pc < info.line_info.size()) {
                 current_line_info = info.line_info.at(pc);
             }
 
-            prog.emplace_back(Label(gsl::narrow<int>(pc)), new_ins, current_line_info);
+            Label label{gsl::narrow<int>(pc)};
+            set_special_label(label, new_ins);
+            prog.emplace_back(label, new_ins, current_line_info);
 
             pc++;
             note_next_pc();
@@ -788,17 +947,22 @@ struct Unmarshaller {
                 note_next_pc();
             }
         }
+*/
+
         if (exit_count == 0) {
             note("no exit instruction");
         }
-        return prog;
+
+        // Set the new function_locations as a 128 bits instruction = 1 instruction, not 2.
+        prog.function_locations = std::move(new_function_locations);
+        return new_insts;
     }
 };
 
-std::variant<InstructionSeq, std::string> unmarshal(const RawProgram& raw_prog, vector<vector<string>>& notes) {
+std::variant<InstructionSeq, std::string> unmarshal(const RawProgram& raw_prog, vector<vector<string>>& notes, const prevail::ebpf_verifier_options_t &options) {
     thread_local_program_info = raw_prog.info;
     try {
-        return Unmarshaller{notes, raw_prog.info}.unmarshal(raw_prog.prog);
+        return Unmarshaller{notes, raw_prog.info}.unmarshal(raw_prog, options);
     } catch (InvalidInstruction& arg) {
         std::ostringstream ss;
         ss << arg.pc << ": " << arg.what() << "\n";
@@ -806,9 +970,9 @@ std::variant<InstructionSeq, std::string> unmarshal(const RawProgram& raw_prog, 
     }
 }
 
-std::variant<InstructionSeq, std::string> unmarshal(const RawProgram& raw_prog) {
+std::variant<InstructionSeq, std::string> unmarshal(const RawProgram& raw_prog, const prevail::ebpf_verifier_options_t &options) {
     vector<vector<string>> notes;
-    return unmarshal(raw_prog, notes);
+    return unmarshal(raw_prog, notes, options);
 }
 
 Call make_call(const int imm, const ebpf_platform_t& platform) {

@@ -95,6 +95,28 @@ class WtoCycle final {
     WtoPartition::const_reverse_iterator end() const {
         return _components.crend();
     }
+
+    void insert_after_head(const CycleOrLabel& component) {
+        _components.insert(_components.end()-1, component);
+    }
+
+    void for_each_loop_head(auto&& f) const {
+        for (const auto& component : *this) {
+            if (const auto pc = std::get_if<std::shared_ptr<WtoCycle>>(&component)) {
+                f((*pc)->head());
+                (*pc)->for_each_loop_head(f);
+            }
+        }
+    }
+
+    void for_each_cycle(auto&& f) const {
+        for (const auto& component : *this) {
+            if (const auto pc = std::get_if<std::shared_ptr<WtoCycle>>(&component)) {
+                f((*pc));
+                (*pc)->for_each_cycle(f);
+            }
+        }
+    }
 };
 
 // Check if node is a member of the wto component.
@@ -145,6 +167,23 @@ class Wto final {
         for (const auto& component : *this) {
             if (const auto pc = std::get_if<std::shared_ptr<WtoCycle>>(&component)) {
                 f((*pc)->head());
+                (*pc)->for_each_loop_head(f);
+            }
+        }
+    }
+
+    /**
+     * Visit each cycle in the WTO.
+     *
+     * @param f The callable to be invoked for each cycle.
+     *
+     * The order in which the cycles are visited is not specified.
+     */
+    void for_each_cycle(auto&& f) const {
+        for (const auto& component : *this) {
+            if (const auto pc = std::get_if<std::shared_ptr<WtoCycle>>(&component)) {
+                f((*pc));
+                (*pc)->for_each_cycle(f);
             }
         }
     }

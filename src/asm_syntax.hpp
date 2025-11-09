@@ -9,6 +9,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <set>
 
 #include "cfg/label.hpp"
 #include "crab/type_encoding.hpp"
@@ -381,6 +382,8 @@ void print(const InstructionSeq& insts, std::ostream& out, const std::optional<c
            bool print_line_info = false);
 
 int size(const Instruction& inst);
+
+void print_jump(std::ostream& o, const std::string& direction, const std::string frame_prefix, const std::set<Label>& labels);
 
 template <class... Ts>
 struct Overloaded : Ts... {

@@ -50,15 +50,13 @@ std::ostream& operator<<(std::ostream& os, const Label& label) {
     if (label == Label::exit) {
         return os << "exit";
     }
-    if (!label.stack_frame_prefix.empty()) {
-        os << label.stack_frame_prefix << STACK_FRAME_DELIMITER;
-    }
     os << label.from;
     if (label.to != -1) {
         os << ":" << label.to;
     }
-    if (!label.special_label.empty()) {
-        os << " (" << label.special_label << ")";
+    const auto special = to_string(label.special_label);
+    if (!special.empty()) {
+        os << " (" << to_string(label.special_label) << ")";
     }
     return os;
 }
@@ -67,6 +65,20 @@ string to_string(Label const& label) {
     std::stringstream str;
     str << label;
     return str.str();
+}
+
+std::string to_string(SpecialLabel label) {
+    switch (label) {
+    case SpecialLabel::Empty:
+    case SpecialLabel::Exit:
+    case SpecialLabel::CallLocal:
+    case SpecialLabel::Call:
+        return "";
+    case SpecialLabel::LoopCounter:
+        return "counter";
+    default:
+        return "unknown";
+    }
 }
 
 struct LineInfoPrinter {
@@ -86,12 +98,12 @@ struct LineInfoPrinter {
     }
 };
 
-void print_jump(std::ostream& o, const std::string& direction, const std::set<Label>& labels) {
+void print_jump(std::ostream& o, const std::string& direction, const std::string frame_prefix, const std::set<Label>& labels) {
     auto [it, et] = std::pair{labels.begin(), labels.end()};
     if (it != et) {
         o << "  " << direction << " ";
         while (it != et) {
-            o << *it;
+            o << frame_prefix << *it;
             ++it;
             if (it == et) {
                 o << ";";
@@ -103,24 +115,30 @@ void print_jump(std::ostream& o, const std::string& direction, const std::set<La
     o << "\n";
 }
 
+//TODO
 void print_program(const Program& prog, std::ostream& os, const bool simplify, const printfunc& prefunc,
                    const printfunc& postfunc) {
+/*
     LineInfoPrinter printer{os};
-    for (const BasicBlock& bb : BasicBlock::collect_basic_blocks(prog.cfg(), simplify)) {
-        prefunc(os, bb.first_label());
-        print_jump(os, "from", prog.cfg().parents_of(bb.first_label()));
-        os << bb.first_label() << ":\n";
-        for (const Label& label : bb) {
-            printer.print_line_info(label);
-            for (const auto& pre : prog.assertions_at(label)) {
-                os << "  " << "assert " << pre << ";\n";
+
+    for (const auto& [function, cfg] : prog.cfg()) {
+        for (const BasicBlock& bb : BasicBlock::collect_basic_blocks(cfg, simplify)) {
+            prefunc(os, bb.first_label());
+            print_jump(os, "from", cfg.parents_of(bb.first_label()));
+            os << bb.first_label() << ":\n";
+            for (const Label& label : bb) {
+                printer.print_line_info(label);
+                for (const auto& pre : prog.assertions_at(label)) {
+                    os << "  " << "assert " << pre << ";\n";
+                }
+                os << "  " << prog.instruction_at(label) << ";\n";
             }
-            os << "  " << prog.instruction_at(label) << ";\n";
+            print_jump(os, "goto", cfg.children_of(bb.last_label()));
+            postfunc(os, bb.last_label());
         }
-        print_jump(os, "goto", prog.cfg().children_of(bb.last_label()));
-        postfunc(os, bb.last_label());
+        os << "\n";
     }
-    os << "\n";
+*/
 }
 
 static void nop(std::ostream&, const Label&) {}
@@ -129,24 +147,29 @@ void print_program(const Program& prog, std::ostream& os, const bool simplify) {
     print_program(prog, os, simplify, nop, nop);
 }
 
+
 void print_dot(const Program& prog, std::ostream& out) {
-    out << "digraph program {\n";
-    out << "    node [shape = rectangle];\n";
-    for (const auto& label : prog.labels()) {
-        out << "    \"" << label << "\"[xlabel=\"" << label << "\",label=\"";
+    for (const auto& [function, cfg] : prog.cfg()) {
+        prog.set_shortcut_instructions(function);
 
-        for (const auto& pre : prog.assertions_at(label)) {
-            out << "assert " << pre << "\\l";
-        }
-        out << prog.instruction_at(label) << "\\l";
+        for (const auto& label : cfg.labels()) {
+            const std::string post_label = (label == cfg.entry_label() || label == cfg.exit_label())? "(" + to_string(function) + ")" : "";
+            out << "    \"" << label << post_label << "\"[xlabel=\"" << label << post_label << "\",label=\"";
 
-        out << "\"];\n";
-        for (const Label& next : prog.cfg().children_of(label)) {
-            out << "    \"" << label << "\" -> \"" << next << "\";\n";
+            for (const auto& pre : get_assertions(prog.instruction_at(label), *thread_local_program_info, {})) {
+                out << "assert " << pre << "\\l";
+            }
+            out << prog.instruction_at(label) << "\\l";
+
+            out << "\"];\n";
+            for (const auto& next : cfg.children_of(label)) {
+                const std::string post_next = (next == cfg.entry_label() || next == cfg.exit_label())? "(" + to_string(function) + ")" : "";
+                    out << "    \"" << label << post_label << "\" -> \"" << next << post_next << "\";\n";
+            }
+            out << "\n";
         }
-        out << "\n";
+        prog.reset_shortcut_instructions();
     }
-    out << "}\n";
 }
 
 void print_dot(const Program& prog, const std::string& outfile) {
@@ -154,35 +177,137 @@ void print_dot(const Program& prog, const std::string& outfile) {
     if (out.fail()) {
         throw std::runtime_error(std::string("Could not open file ") + outfile);
     }
+
+    out << "digraph program {\n";
+    out << "    node [shape = rectangle];\n";
     print_dot(prog, out);
+    out << "}\n";
 }
 
-void print_reachability(std::ostream& os, const Report& report) {
-    for (const auto& [label, notes] : report.reachability) {
-        for (const auto& msg : notes) {
-            os << label << ": " << msg << "\n";
+static void print_dot_unroll(const Program& prog, const std::string& frame_prefix, const Label& function, const std::string& target_return, std::ostream& out);
+
+static void print_dot_unroll_label(const Program& prog, const Cfg& cfg, const std::string& frame_prefix, const Label& function, const Label& label, const std::string& target_return, std::ostream& out) {
+    const std::string post_label = (label == cfg.entry_label() || label == cfg.exit_label())? "(" + to_string(function) + ")" : "";
+    out << "    \"" << frame_prefix << label << post_label << "\"[xlabel=\"" << frame_prefix << label << post_label << "\",label=\"";
+
+    for (const auto& pre : get_assertions(prog.instruction_at(label), *thread_local_program_info, frame_prefix)) {
+        out << "assert " << pre << "\\l";
+    }
+    out << prog.instruction_at(label) << "\\l";
+
+    out << "\"];\n";
+
+    // CallLocal instructions have one child.
+    if (const auto call_local = std::get_if<CallLocal>(&(prog.instruction_at(label)))) {
+        const auto child = cfg.get_child(label);
+        const std::string next_frame_prefix = frame_prefix + to_string(label) + "/";
+        const std::string post_target = (call_local->target == cfg.entry_label() || call_local->target == cfg.exit_label())? "(" + to_string(call_local->target) + ")" : "";
+        const std::string post_child = (child == cfg.entry_label() || child == cfg.exit_label())? "(" + to_string(child) + ")" : "";
+
+        out << "    \"" << frame_prefix <<  label << post_label << "\" -> \"" << next_frame_prefix << call_local->target << post_target << "\";\n";
+        out << "\n";
+
+        prog.reset_shortcut_instructions();
+        prog.reset_shortcut_cfg();
+        print_dot_unroll(prog, next_frame_prefix, call_local->target, frame_prefix + to_string(child) + post_child , out);
+        prog.set_shortcut_instructions(function);
+        prog.set_shortcut_cfg(function);
+    }
+    // Exit instructions have one child.
+    else if (target_return != "" && label == Label::exit) {
+        // post of target_return was set in target_return by the caller function
+        out << "    \"" << frame_prefix <<  label << post_label << "\" -> \"" << target_return << "\";\n";
+    }
+    else {
+        for (const Label& next : cfg.children_of(label)) {
+            const std::string post_next = (next == cfg.entry_label() || next == cfg.exit_label())? "(" + to_string(function) + ")" : "";
+            out << "    \"" << frame_prefix << label << post_label << "\" -> \"" << frame_prefix << next << post_next << "\";\n";
+        }
+        out << "\n";
+    }
+}
+
+static void print_dot_unroll_cycle(const Program& prog, const Cfg& cfg, const std::string& frame_prefix, const Label& function, const std::shared_ptr<WtoCycle>& wto_cycle, const std::string& target_return, std::ostream& out) {
+    for (const auto& element : *wto_cycle) {
+        if (const auto label = std::get_if<Label>(&element)) {
+            print_dot_unroll_label(prog, cfg, frame_prefix, function, *label, target_return, out);
+        }
+        else if (const auto cycle = std::get_if<std::shared_ptr<WtoCycle>>(&element)) {
+            print_dot_unroll_cycle(prog, cfg, frame_prefix, function, *cycle, target_return, out);
+        }
+        else {
+            throw std::runtime_error("Unexpected element on a WTO");
         }
     }
-    os << "\n";
 }
 
-void print_warnings(std::ostream& os, const Report& report) {
-    LineInfoPrinter printer{os};
-    for (const auto& [label, warnings] : report.warnings) {
-        for (const auto& msg : warnings) {
-            printer.print_line_info(label);
-            os << label << ": " << msg << "\n";
+static void print_dot_unroll(const Program& prog, const std::string& frame_prefix, const Label& function, const std::string& target_return, std::ostream& out) {
+    prog.set_shortcut_instructions(function);
+    prog.set_shortcut_cfg(function);
+    const auto& cfg = prog.cfg(function);
+
+    for (const auto& element : prog.wto(function)) {
+        if (const auto label = std::get_if<Label>(&element)) {
+            print_dot_unroll_label(prog, cfg, frame_prefix, function, *label, target_return, out);
+        }
+        else if (const auto wto_cycle = std::get_if<std::shared_ptr<WtoCycle>>(&element)) {
+            print_dot_unroll_cycle(prog, cfg, frame_prefix, function, *wto_cycle, target_return, out);
+        }
+        else {
+            throw std::runtime_error("Unexpected element on a WTO");
         }
     }
-    os << "\n";
+    prog.reset_shortcut_instructions();
+    prog.reset_shortcut_cfg();
 }
 
-void print_all_messages(std::ostream& os, const Report& report) {
-    print_reachability(os, report);
-    print_warnings(os, report);
+void print_dot_unroll(const Program& prog, const std::string& outfile) {
+    std::ofstream out{outfile};
+    if (out.fail()) {
+        throw std::runtime_error(std::string("Could not open file ") + outfile);
+    }
+
+    out << "digraph program {\n";
+    out << "    node [shape = rectangle];\n";
+    print_dot_unroll(prog, "", prog.get_entry_point(), "", out);
+    out << "}\n";
 }
 
-void print_invariants(std::ostream& os, const Program& prog, const bool simplify, const Invariants& invariants) {
+//void print_reachability(std::ostream& os, const Report& report) {
+//    for (const auto& [label, notes] : report.reachability) {
+//        for (const auto& msg : notes) {
+//            os << label << ": " << msg << "\n";
+//        }
+//    }
+//    os << "\n";
+//}
+
+//void print_warnings(std::ostream& os, const Report& report) {
+//    LineInfoPrinter printer{os};
+//    for (const auto& [label, warnings] : report.warnings) {
+//        for (const auto& msg : warnings) {
+//            printer.print_line_info(label);
+//            os << label << ": " << msg << "\n";
+//        }
+//    }
+//    os << "\n";
+//}
+
+//void print_all_messages(std::ostream& os, const Report& report) {
+//    print_reachability(os, report);
+//    print_warnings(os, report);
+//}
+
+//TODO
+//void print_invariants(std::ostream& os, const Program& prog, const InvariantMapPair& invariants) {
+//    print_basic_block(prog, os,
+//        [&](std::ostream& os, const Label& label) -> void {
+//            os << "\nPre-invariant : " << invariants.invariants.at(label).pre << "\n";
+//        },
+//        [&](std::ostream& os, const Label& label) -> void {
+//            os << "\nPost-invariant : " << invariants.invariants.at(label).post << "\n";
+//        });
+/*
     print_program(
         prog, os, simplify,
         [&](std::ostream& os, const Label& label) -> void {
@@ -191,6 +316,15 @@ void print_invariants(std::ostream& os, const Program& prog, const bool simplify
         [&](std::ostream& os, const Label& label) -> void {
             os << "\nPost-invariant : " << invariants.invariants.at(label).post << "\n";
         });
+}
+*/
+
+void print_report(std::ostream& os, std::vector<std::pair<Label, std::string>>& report) {
+    LineInfoPrinter printer{os};
+    for (const auto& [label, msg] : report) {
+        printer.print_line_info(label);
+        os << msg << std::endl;
+    }
 }
 
 std::ostream& operator<<(std::ostream& os, const ArgSingle::Kind kind) {

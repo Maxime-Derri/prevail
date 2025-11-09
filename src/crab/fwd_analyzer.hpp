@@ -9,12 +9,15 @@
 
 namespace prevail {
 
+class InterleavedFwdFixpointIterator;
+
 struct InvariantMapPair {
     EbpfDomain pre;
     EbpfDomain post;
 };
-using InvariantTable = std::map<Label, InvariantMapPair>;
+using InvariantTable = std::map<Label, std::map<Label, InvariantMapPair>>;
 
-InvariantTable run_forward_analyzer(const Program& prog, EbpfDomain entry_inv);
+void run_forward_analyzer_function(InterleavedFwdFixpointIterator& analyser);
+std::vector<std::pair<Label, std::string>> run_forward_analyzer(const Program& prog, EbpfDomain entry_inv);
 
 } // namespace prevail

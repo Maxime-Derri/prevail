@@ -32,14 +32,18 @@ EbpfDomain EbpfDomain::bottom() {
     return abs;
 }
 
-EbpfDomain::EbpfDomain() {}
+EbpfDomain::EbpfDomain(std::optional<std::string> frame_prefix) : frame_prefix(std::move(frame_prefix)) {}
 
-EbpfDomain::EbpfDomain(TypeToNumDomain rcp, ArrayDomain stack) : rcp(std::move(rcp)), stack(std::move(stack)) {}
+EbpfDomain::EbpfDomain(TypeToNumDomain rcp, ArrayDomain stack, std::optional<std::string> frame_prefix) : rcp(std::move(rcp)), stack(std::move(stack)), frame_prefix(std::move(frame_prefix)) {}
 
 void EbpfDomain::set_to_top() {
     rcp.values.set_to_top();
     stack.set_to_top();
 }
+
+void EbpfDomain::set_frame_prefix(std::optional<std::string> prefix) { frame_prefix = std::move(prefix); }
+
+const std::optional<std::string>& EbpfDomain::get_frame_prefix() const { return frame_prefix; }
 
 void EbpfDomain::set_to_bottom() { rcp.values.set_to_bottom(); }
 
@@ -54,31 +58,55 @@ bool EbpfDomain::operator<=(const EbpfDomain& other) const {
     return rcp <= other.rcp;
 }
 
-bool EbpfDomain::operator==(const EbpfDomain& other) const {
-    return stack == other.stack && rcp <= other.rcp && other.rcp <= rcp;
+bool EbpfDomain::operator<=(EbpfDomain&& other) const {
+    if (!(stack <= other.stack)) {
+        return false;
+    }
+    return rcp <= std::move(other.rcp);
 }
 
 void EbpfDomain::operator|=(EbpfDomain&& other) {
-    if (is_bottom()) {
-        stack = other.stack;
-    } else if (!other.is_bottom()) {
-        stack |= other.stack;
+    if (other.is_bottom()) {
+        return;
     }
+    if (is_bottom()) {
+        *this = std::move(other);
+        return;
+    }
+    stack |= std::move(other.stack);
     rcp |= std::move(other.rcp);
 }
 
 void EbpfDomain::operator|=(const EbpfDomain& other) {
-    EbpfDomain tmp{other};
-    operator|=(std::move(tmp));
+    if (other.is_bottom()) {
+        return;
+    }
+    if (is_bottom()) {
+        *this = other;
+        return;
+    }
+    stack |= other.stack;
+    rcp |= other.rcp;
 }
 
 EbpfDomain EbpfDomain::operator|(EbpfDomain&& other) const {
-    EbpfDomain res{std::move(other)};
-    res |= *this;
-    return res;
+    if (other.is_bottom()) {
+        return *this;
+    }
+    if (is_bottom()) {
+        return std::move(other);
+    }
+    other |= *this;
+    return other;
 }
 
 EbpfDomain EbpfDomain::operator|(const EbpfDomain& other) const& {
+    if (other.is_bottom()) {
+        return *this;
+    }
+    if (is_bottom()) {
+        return other;
+    }
     EbpfDomain res{other};
     res |= *this;
     return res;
@@ -88,12 +116,21 @@ EbpfDomain EbpfDomain::operator|(const EbpfDomain& other) && {
     EbpfDomain res{std::move(*this)};
     res |= other;
     return res;
+    if (other.is_bottom()) {
+        return std::move(*this);
+    }
+    if (is_bottom()) {
+        return other;
+    }
+    *this |= other;
+    return std::move(*this);
 }
 
 EbpfDomain EbpfDomain::operator&(const EbpfDomain& other) const {
     auto res = rcp & other.rcp;
     if (!res.is_bottom()) {
-        return EbpfDomain(res, stack & other.stack);
+        //return EbpfDomain(res, stack & other.stack);
+        return {std::move(res), stack & other.stack};
     }
     return bottom();
 }

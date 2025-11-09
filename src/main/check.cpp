@@ -54,19 +54,6 @@ static std::set<std::string> _get_conformance_group_names() {
     return result;
 }
 
-static std::optional<RawProgram> find_program(vector<RawProgram>& raw_progs, const std::string& desired_program) {
-    if (desired_program.empty() && raw_progs.size() == 1) {
-        // Select the last program section.
-        return raw_progs.back();
-    }
-    for (RawProgram current_program : raw_progs) {
-        if (current_program.function_name == desired_program) {
-            return current_program;
-        }
-    }
-    return {};
-}
-
 int main(int argc, char** argv) {
     // Always call ebpf_verifier_clear_thread_local_state on scope exit.
     AtScopeExit<ebpf_verifier_clear_thread_local_state> clear_thread_local_state;
@@ -97,6 +84,12 @@ int main(int argc, char** argv) {
         ->type_name("DOMAIN")
         ->capture_default_str()
         ->check(CLI::IsMember({"stats", "linux", "zoneCrab", "cfg"}));
+
+    bool print_hash = false;
+    app.add_flag("--print-hash", print_hash, "Print the hash of the program");
+
+    bool print_instructions = false;
+    app.add_flag("--print-instructions", print_instructions, "Print the number of instructions of the program");
 
     app.add_flag("--termination,!--no-verify-termination", ebpf_verifier_options.cfg_opts.check_for_termination,
                  "Verify termination. Default: ignore")
@@ -148,6 +141,8 @@ int main(int argc, char** argv) {
     app.add_option("--asm", asmfile, "Print disassembly to FILE")->group("CFG output")->type_name("FILE");
     std::string dotfile;
     app.add_option("--dot", dotfile, "Export control-flow graph to dot FILE")->group("CFG output")->type_name("FILE");
+    std::string dotfile_unroll;
+    app.add_option("--dot-unroll", dotfile_unroll, "Export unrolled control-flow graph to dot FILE")->group("CFG output")->type_name("FILE");
 
     CLI11_PARSE(app, argc, argv);
 
@@ -176,9 +171,14 @@ int main(int argc, char** argv) {
                 std::cout << "," << h;
             }
         } else {
-            std::cout << domain << "?,";
-            std::cout << domain << "_sec,";
-            std::cout << domain << "_kb";
+            if (print_hash)
+                std::cout << "hash,";
+            if (print_instructions)
+                std::cout << "instructions,";
+            std::cout << "result,";
+            std::cout << "cfg_sec,";
+            std::cout << "invariants_sec,";
+            std::cout << "hwm_kb";
         }
         std::cout << "\n";
         return 0;
@@ -198,14 +198,13 @@ int main(int argc, char** argv) {
     // Read a set of raw program sections from an ELF file.
     vector<RawProgram> raw_progs;
     try {
-        raw_progs = read_elf(filename, desired_section, ebpf_verifier_options, &platform);
+        raw_progs = read_elf(filename, desired_section, desired_program, ebpf_verifier_options, &platform);
     } catch (std::runtime_error& e) {
         std::cerr << "error: " << e.what() << std::endl;
         return 1;
     }
 
-    std::optional<RawProgram> found_prog = find_program(raw_progs, desired_program);
-    if (list || !found_prog) {
+    if (list || raw_progs.size() != 1) {
         if (!list) {
             std::cout << "please specify a program\n";
             std::cout << "available programs:\n";
@@ -213,7 +212,7 @@ int main(int argc, char** argv) {
         if (!desired_section.empty() && raw_progs.empty()) {
             // We could not find the desired program, so get the full list
             // of possibilities.
-            raw_progs = read_elf(filename, string(), ebpf_verifier_options, &platform);
+            raw_progs = read_elf(filename, string(), string(), ebpf_verifier_options, &platform);
         }
         for (const RawProgram& raw_prog : raw_progs) {
             std::cout << "section=" << raw_prog.section_name << " function=" << raw_prog.function_name << std::endl;
@@ -221,10 +220,10 @@ int main(int argc, char** argv) {
         std::cout << "\n";
         return list ? 0 : 64;
     }
-    RawProgram raw_prog = *found_prog;
+    RawProgram& raw_prog = raw_progs.back();
 
     // Convert the raw program section to a set of instructions.
-    std::variant<InstructionSeq, std::string> prog_or_error = unmarshal(raw_prog);
+    std::variant<InstructionSeq, std::string> prog_or_error = unmarshal(raw_prog, ebpf_verifier_options);
     if (auto prog = std::get_if<string>(&prog_or_error)) {
         std::cout << "unmarshaling error at " << *prog << "\n";
         return 1;
@@ -241,32 +240,34 @@ int main(int argc, char** argv) {
         // Convert the instruction sequence to a control-flow graph.
         try {
             const auto verbosity = ebpf_verifier_options.verbosity_opts;
-            const Program prog = Program::from_sequence(inst_seq, raw_prog.info, ebpf_verifier_options);
+
+            auto begin = std::chrono::steady_clock::now();
+            const Program prog = Program::from_sequence(inst_seq, raw_prog.function_locations, raw_prog.info, ebpf_verifier_options);
+            auto end = std::chrono::steady_clock::now();
+            const auto seconds_cfg = std::chrono::duration<double>(end - begin).count();
+
             if (domain == "cfg") {
                 print_program(prog, std::cout, verbosity.simplify);
                 return 0;
             }
-            const auto begin = std::chrono::steady_clock::now();
-            auto invariants = analyze(prog);
-            const auto end = std::chrono::steady_clock::now();
-            const auto seconds = std::chrono::duration<double>(end - begin).count();
-            if (verbosity.print_invariants) {
-                print_invariants(std::cout, prog, verbosity.simplify, invariants);
-            }
+
+            begin = std::chrono::steady_clock::now();
+            auto report = analyze(prog);
+            end = std::chrono::steady_clock::now();
+            const auto seconds_invariants = std::chrono::duration<double>(end - begin).count();
 
             bool pass;
+            pass = report.empty();
+
             if (verbosity.print_failures) {
-                auto report = invariants.check_assertions(prog);
-                print_warnings(std::cout, report);
-                pass = report.verified();
-            } else {
-                pass = invariants.verified(prog);
+                print_report(std::cout, report);
             }
-            if (pass && ebpf_verifier_options.cfg_opts.check_for_termination &&
-                (verbosity.print_failures || verbosity.print_invariants)) {
-                std::cout << "Program terminates within " << invariants.max_loop_count() << " loop iterations\n";
-            }
-            std::cout << pass << "," << seconds << "," << resident_set_size_kb() << "\n";
+
+            if (print_hash)
+                std::cout << std::hex << hash(raw_prog) << std::dec << ",";
+            if (print_instructions)
+                std::cout << inst_seq.size() << ',';
+            std::cout << pass << "," << seconds_cfg << "," << seconds_invariants << "," << hwm_kb() << "\n";
             return pass ? 0 : 1;
         } catch (UnmarshalError& e) {
             std::cerr << "error: " << e.what() << std::endl;
@@ -275,16 +276,19 @@ int main(int argc, char** argv) {
     } else if (domain == "linux") {
         // Pass the instruction sequence to the Linux kernel verifier.
         const auto [res, seconds] = bpf_verify_program(raw_prog.info.type, raw_prog.prog, &ebpf_verifier_options);
-        std::cout << res << "," << seconds << "," << resident_set_size_kb() << "\n";
+        std::cout << res << "," << seconds << "," << hwm_kb() << "\n";
         return !res;
     } else if (domain == "stats") {
         // Convert the instruction sequence to a control-flow graph.
-        const Program prog = Program::from_sequence(inst_seq, raw_prog.info, ebpf_verifier_options);
+        const Program prog = Program::from_sequence(inst_seq, raw_prog.function_locations, raw_prog.info, ebpf_verifier_options);
 
         // Just print eBPF program stats.
         auto stats = collect_stats(prog);
         if (!dotfile.empty()) {
             print_dot(prog, dotfile);
+        }
+        if (!dotfile_unroll.empty()) {
+            print_dot_unroll(prog, dotfile_unroll);
         }
         std::cout << std::hex << hash(raw_prog) << std::dec << "," << inst_seq.size();
         for (const string& h : stats_headers()) {

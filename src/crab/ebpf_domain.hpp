@@ -39,8 +39,8 @@ class EbpfDomain final {
     friend std::ostream& operator<<(std::ostream& o, const EbpfDomain& dom);
 
   public:
-    EbpfDomain();
-    EbpfDomain(TypeToNumDomain rcp, ArrayDomain stack);
+    EbpfDomain(std::optional<std::string> frame_prefix = std::nullopt);
+    EbpfDomain(TypeToNumDomain rcp, ArrayDomain stack, std::optional<std::string> frame_prefix = std::nullopt);
 
     // Generic abstract domain operations
     static EbpfDomain top();
@@ -52,7 +52,8 @@ class EbpfDomain final {
     [[nodiscard]]
     bool is_top() const;
     bool operator<=(const EbpfDomain& other) const;
-    bool operator==(const EbpfDomain& other) const;
+    bool operator<=(EbpfDomain&& other) const;
+    //bool operator==(const EbpfDomain& other) const;
     void operator|=(EbpfDomain&& other);
     void operator|=(const EbpfDomain& other);
     EbpfDomain operator|(EbpfDomain&& other) const;
@@ -75,6 +76,9 @@ class EbpfDomain final {
     void initialize_packet();
 
     StringInvariant to_set() const;
+
+    void set_frame_prefix(std::optional<std::string> prefix);
+    const std::optional<std::string>& get_frame_prefix() const;
 
   private:
     // private generic domain functions
@@ -101,6 +105,8 @@ class EbpfDomain final {
     /// allowing mapping to variable in the m_inv numeric domains
     /// while dealing with overlapping byte ranges.
     ArrayDomain stack;
+
+    std::optional<std::string> frame_prefix;
 };
 
 } // namespace prevail

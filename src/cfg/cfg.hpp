@@ -12,6 +12,7 @@
 
 #include "cfg/label.hpp"
 #include "crab_utils/debug.hpp"
+#include "asm_syntax.hpp"
 
 namespace prevail {
 
@@ -179,4 +180,7 @@ class BasicBlock final {
 
 Cfg cfg_from_adjacency_list(const std::map<Label, std::vector<Label>>& AdjList);
 
+std::optional<std::vector<std::pair<size_t, size_t>>> get_function_locations(const InstructionSeq& inst_seq);
+
+size_t call_stack_depth(const std::string& frame_prefix);
 } // end namespace prevail

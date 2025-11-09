@@ -70,6 +70,7 @@ struct RawProgram {
     uint32_t insn_off{}; // Byte offset in section of first instruction in this program.
     std::string function_name{};
     std::vector<EbpfInst> prog{};
+    mutable std::vector<std::pair<size_t, size_t>> function_locations{};
     ProgramInfo info{};
 };
 
